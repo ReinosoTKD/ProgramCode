@@ -1,201 +1,100 @@
+//
+//  MiniRutas.swift
+//  Un clon de Mini Motorways en un único archivo SwiftUI.
+//  Requiere iOS 15+ / macOS 12+.
+//
+//  Cómo se juega:
+//  - Arrastra sobre el tablero para dibujar calles.
+//  - Cada casa envía coches a la tienda (destino) de su mismo color.
+//  - Si una casa acumula 4 coches, empieza una cuenta atrás y, al llenarse,
+//    la partida termina. El asfalto es limitado: borra calles para recuperarlo.
+//
+
+import SwiftUI
+import Foundation
+import Combine
+
+// MARK: - Paleta
+
+enum Theme {
+    static let bgTop      = Color(red: 0.98, green: 0.96, blue: 0.91)
+    static let bgBottom   = Color(red: 0.92, green: 0.88, blue: 0.79)
+    static let board      = Color(red: 0.95, green: 0.92, blue: 0.85)
+    static let boardEdge  = Color(red: 0.85, green: 0.80, blue: 0.70)
+    static let dot        = Color(red: 0.83, green: 0.79, blue: 0.70)
+    static let ink        = Color(red: 0.18, green: 0.16, blue: 0.13)
+    static let inkSoft    = Color(red: 0.42, green: 0.38, blue: 0.32)
+    static let road       = Color.white
+    static let roadCasing = Color(red: 0.75, green: 0.71, blue: 0.62)
+    static let danger     = Color(red: 0.86, green: 0.23, blue: 0.19)
+    static let panel      = Color.white.opacity(0.82)
+}
+
+enum BuildingColor: Int, CaseIterable, Hashable {
+    case red, blue, yellow, green
+
+    var ui: Color {
+        switch self {
+        case .red:    return Color(red: 0.90, green: 0.32, blue: 0.24)
+        case .blue:   return Color(red: 0.18, green: 0.49, blue: 0.78)
+        case .yellow: return Color(red: 0.96, green: 0.66, blue: 0.10)
+        case .green:  return Color(red: 0.20, green: 0.62, blue: 0.44)
+        }
     }
 
-    func gridPoint(at location: CGPoint) -> GridPoint? {
-        let fx = (location.x - origin.x) / cell
-        let fy = (location.y - origin.y) / cell
-        guard fx >= 0, fy >= 0, fx < CGFloat(cols), fy < CGFloat(rows) else {
-            return nil
+    var name: String {
+        switch self {
+        case .red:    return "roja"
+        case .blue:   return "azul"
+        case .yellow: return "amarilla"
+        case .green:  return "verde"
         }
-        return GridPoint(x: Int(fx), y: Int(fy))
     }
 }
 
-// MARK: - Motor del juego
+// MARK: - Modelo
 
-final class GameEngine: ObservableObject {
-    @Published private(set) var state: GameState
+struct GridPoint: Hashable {
+    var x: Int
+    var y: Int
 
-    private var timer: Timer?
-    private var lastTick = Date()
-    private var idCounter = 1000
+    var center: CGPoint { CGPoint(x: Double(x) + 0.5, y: Double(y) + 0.5) }
+}
 
-    private var adjacencyCache: [GridPoint: [GridPoint]] = [:]
-    private var adjacencyVersion = -1
-    private var roadsVersion = 0
+struct RoadEdge: Hashable {
+    let a: GridPoint
+    let b: GridPoint
 
-    private var strokeLast: GridPoint?
-    private(set) var isStroking = false
-
-    private static let bestKey = "miniRutas.bestScore"
-
-    init() {
-        state = GameState.newGame()
-        state.bestScore = UserDefaults.standard.integer(forKey: Self.bestKey)
-        state.phase = .menu
-
-        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            self?.tick()
-        }
-        RunLoop.main.add(t, forMode: .common)
-        timer = t
-        lastTick = Date()
-    }
-
-    deinit {
-        timer?.invalidate()
-    }
-
-    // MARK: Controles
-
-    func startGame() {
-        state = GameState.newGame()
-        state.bestScore = UserDefaults.standard.integer(forKey: Self.bestKey)
-        state.phase = .playing
-        adjacencyVersion = -1
-        strokeLast = nil
-        isStroking = false
-        lastTick = Date()
-    }
-
-    func restart() {
-        startGame()
-    }
-
-    func togglePause() {
-        switch state.phase {
-        case .playing:
-            state.phase = .paused
-            strokeLast = nil
-            isStroking = false
-        case .paused:
-            state.phase = .playing
-            lastTick = Date()
-        default:
-            break
+    init(_ p: GridPoint, _ q: GridPoint) {
+        if p.x < q.x || (p.x == q.x && p.y <= q.y) {
+            a = p
+            b = q
+        } else {
+            a = q
+            b = p
         }
     }
+}
 
-    func autoPause() {
-        guard state.phase == .playing else { return }
-        state.phase = .paused
-        strokeLast = nil
-        isStroking = false
-    }
+enum GamePhase: Equatable {
+    case menu, playing, paused, gameOver
+}
 
-    func toggleErase() {
-        guard state.phase == .playing else { return }
-        state.eraseMode.toggle()
-        strokeLast = nil
-        isStroking = false
-    }
+struct House: Identifiable {
+    static let capacity = 4
 
-    private func tick() {
-        let now = Date()
-        let dt = min(max(now.timeIntervalSince(lastTick), 0), 0.05)
-        lastTick = now
-        guard state.phase == .playing else { return }
-        update(dt)
-    }
+    let id: Int
+    var pos: GridPoint
+    var color: BuildingColor
+    var spawnTimer: Double
+    var queue: Int
+    var panic: Double
 
-    // MARK: Bucle principal
-
-    private func update(_ dt: Double) {
-        state.elapsed += dt
-        state.budgetPulse = max(0, state.budgetPulse - dt * 2.5)
-
-        state.roadRefillTimer -= dt
-
-        if state.roadRefillTimer <= 0 {
-            state.roadRefillTimer += 16
-            state.budget = min(state.maxBudget, state.budget + 12)
-        }
-
-        state.spawnHouseTimer -= dt
-        if state.spawnHouseTimer <= 0 {
-            state.spawnHouseTimer += 22
-            spawnHouse()
-        }
-
-        let spawnScale = max(0.55, 1.0 - state.elapsed / 420.0)
-        for i in state.houses.indices {
-            if state.houses[i].queue < House.capacity {
-                state.houses[i].spawnTimer -= dt
-                if state.houses[i].spawnTimer <= 0 {
-                    state.houses[i].spawnTimer = Double.random(in: 4.5...7.5) * spawnScale
-                    state.houses[i].queue += 1
-                }
-            }
-
-            if state.houses[i].queue >= House.capacity {
-                state.houses[i].panic = min(1, state.houses[i].panic + dt / 10.0)
-            } else {
-                state.houses[i].panic = max(0, state.houses[i].panic - dt / 5.0)
-            }
-
-            if state.houses[i].panic >= 1 {
-                finishGame(house: state.houses[i])
-                return
-            }
-        }
-
-        state.dispatchTimer -= dt
-        if state.dispatchTimer <= 0 {
-            state.dispatchTimer = 0.2
-            dispatchCars()
-        }
-
-        updateCars(dt)
-        updateEffects(dt)
-
-        for i in state.destinations.indices {
-            state.destinations[i].pulse = max(0, state.destinations[i].pulse - dt * 2.0)
-        }
-    }
-
-    private func finishGame(house: House) {
-        state.phase = .gameOver
-        state.gameOverMessage = "La casa \(house.color.name) quedó aislada y su cola de coches se desbordó."
-        if state.score > state.bestScore {
-            state.bestScore = state.score
-            UserDefaults.standard.set(state.bestScore, forKey: Self.bestKey)
-        }
-        strokeLast = nil
-        isStroking = false
-    }
-
-    // MARK: Coches
-
-    private func dispatchCars() {
-        var active: [Int: Int] = [:]
-        for car in state.cars {
-            active[car.homeID, default: 0] += 1
-        }
-
-        let snapshot = state.houses
-        for house in snapshot where house.queue > 0 && (active[house.id] ?? 0) < 2 {
-            guard let path = route(from: house.pos, color: house.color) else { continue }
-
-            let car = Car(id: nextID(),
-                          color: house.color,
-                          homeID: house.id,
-                          path: path,
-                          speed: 2.6)
-            state.cars.append(car)
-
-            if let i = state.houses.firstIndex(where: { $0.id == house.id }) {
-                state.houses[i].queue -= 1
-                state.houses[i].panic = max(0, state.houses[i].panic - 0.15)
-            }
-            active[house.id, default: 0] += 1
-        }
-    }
-
-    private func updateCars(_ dt: Double) {
-        guard !state.cars.isEmpty else { return }
-        var finished: [Int] = []
-
-        for i in state.cars.indices {
-            var remaining = state.cars[i].speed * dt
-
-            while remaining > 0 {
-                let seg = state.cars[i].segment
+    init(id: Int,
+         pos: GridPoint,
+         color: BuildingColor,
+         spawnTimer: Double,
+         queue: Int = 0,
+         panic: Double = 0) {
+        self.id = id
+        self.pos = pos

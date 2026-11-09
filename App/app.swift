@@ -1,7 +1,13 @@
 //
 //  MiniRutas.swift
 //  Un clon minimalista de Mini Motorways, en un único archivo SwiftUI.
-//  Requiere iOS 15+ / macOS 12+. En iOS está pensado para horizontal.
+//  Requiere iOS 15+ / macOS 12+ (por Canvas y GraphicsContext).
+//  En iOS está pensado para horizontal.
+//
+//  IMPORTANTE EN XCODE:
+//  Este archivo ya contiene el punto de entrada `@main`.
+//  Borra de la plantilla `MiniRutasApp.swift` y `ContentView.swift`
+//  (o no añadas este archivo si el proyecto ya tiene otro `@main`).
 //
 //  Controles:
 //  - Arrastra sobre el tablero para trazar calles sobre una red de rutas oculta.
@@ -256,7 +262,7 @@ struct GridPoint: Hashable {
     var x: Int
     var y: Int
 
-    var center: CGPoint { CGPoint(x: Double(x) + 0.5, y: Double(y) + 0.5) }
+    var center: CGPoint { CGPoint(x: CGFloat(x) + 0.5, y: CGFloat(y) + 0.5) }
 }
 
 struct RoadEdge: Hashable {
@@ -462,11 +468,11 @@ extension GameState {
             (3, GridPoint(x: 5, y: 9), .yellow),
             (4, GridPoint(x: 13, y: 8), .green)
         ]
-        s.malls = mallData.map { id, pos, color in
-            Mall(id: id,
-                 pos: pos,
-                 color: color,
-                 driveway: chooseDriveway(pos: pos, nodes: s.guideNodes))
+        s.malls = mallData.map { entry in
+            Mall(id: entry.0,
+                 pos: entry.1,
+                 color: entry.2,
+                 driveway: chooseDriveway(pos: entry.1, nodes: s.guideNodes))
         }
 
         let houseData: [(Int, GridPoint, BuildingColor, Double)] = [
@@ -477,12 +483,12 @@ extension GameState {
             (105, GridPoint(x: 20, y: 5), .red, 20),
             (106, GridPoint(x: 8, y: 11), .blue, 22)
         ]
-        s.houses = houseData.map { id, pos, color, timer in
-            House(id: id,
-                  pos: pos,
-                  color: color,
-                  driveway: chooseDriveway(pos: pos, nodes: s.guideNodes),
-                  spawnTimer: timer)
+        s.houses = houseData.map { entry in
+            House(id: entry.0,
+                  pos: entry.1,
+                  color: entry.2,
+                  driveway: chooseDriveway(pos: entry.1, nodes: s.guideNodes),
+                  spawnTimer: entry.3)
         }
 
         s.budget = difficulty.initialBudget
@@ -758,9 +764,9 @@ final class GameEngine: ObservableObject {
                 if occupied.contains(p) || roadCells.contains(p) { continue }
                 if state.guideNodes.contains(p) { continue }
 
-                let tooClose = occupied.contains {
-                    abs($0.x - x) + abs($0.y - y) < 2
-                }
+                let tooClose = occupied.contains(where: { other in
+                    abs(other.x - x) + abs(other.y - y) < 2
+                })
                 if tooClose { continue }
 
                 let doorways = GameState.gridNeighbors(p).filter {
@@ -780,7 +786,7 @@ final class GameEngine: ObservableObject {
                                   driveway: doorway,
                                   spawnTimer: 6))
 
-        addEffect(at: CGPoint(x: Double(pos.x) + 0.5, y: Double(pos.y) + 0.1),
+        addEffect(at: CGPoint(x: CGFloat(pos.x) + 0.5, y: CGFloat(pos.y) + 0.1),
                   text: "Nueva casa",
                   color: color,
                   life: 1.2)
@@ -1001,7 +1007,7 @@ final class GameEngine: ObservableObject {
                 buildingSnap = mall.driveway
             }
         }
-        if let buildingSnap { return buildingSnap }
+        if let buildingSnap = buildingSnap { return buildingSnap }
 
         var best: GridPoint?
         var bestDistance = Int.max
@@ -1148,7 +1154,8 @@ final class GameEngine: ObservableObject {
     // MARK: Utilidades
 
     private func building(at point: GridPoint) -> Bool {
-        state.houses.contains { $0.pos == point } || state.malls.contains { $0.pos == point }
+        state.houses.contains(where: { $0.pos == point })
+            || state.malls.contains(where: { $0.pos == point })
     }
 
     private func inBounds(_ point: GridPoint) -> Bool {
@@ -1156,7 +1163,7 @@ final class GameEngine: ObservableObject {
     }
 
     private func gridNeighbors(_ point: GridPoint) -> [GridPoint] {
-        GameState.gridNeighbors(point).filter(inBounds)
+        GameState.gridNeighbors(point).filter { inBounds($0) }
     }
 
     private func nextID() -> Int {
@@ -1309,7 +1316,7 @@ struct BoardRenderer {
             path.move(to: geo.screen(mall.pos))
             path.addLine(to: geo.screen(mall.driveway))
         }
-        guard !path.isEmpty else { return }
+        guard !state.houses.isEmpty || !state.malls.isEmpty else { return }
 
         ctx.stroke(path,
                    with: .color(palette.roadCasing),
@@ -1732,7 +1739,7 @@ struct BoardView: View {
                         }
                 )
 
-                if let pointer,
+                if let pointer = pointer,
                    let point = geo.gridPoint(at: pointer),
                    let snapped = snappedNode(for: point) {
                     let p = geo.screen(snapped)
@@ -1765,7 +1772,7 @@ struct BoardView: View {
                 buildingSnap = mall.driveway
             }
         }
-        if let buildingSnap { return buildingSnap }
+        if let buildingSnap = buildingSnap { return buildingSnap }
 
         var best: GridPoint?
         var bestDistance = Int.max
@@ -1776,7 +1783,7 @@ struct BoardView: View {
                 best = node
             }
         }
-        if let best, bestDistance <= 1 {
+        if let best = best, bestDistance <= 1 {
             return best
         }
         return nil
@@ -1824,7 +1831,7 @@ struct HUDView: View {
             // Asfalto
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
-                    Image(systemName: "road.lanes")
+                    Image(systemName: "square.grid.2x2.fill")
                         .font(.system(size: 11, weight: .bold))
                         .foregroundColor(palette.inkSoft)
                     Text("Asfalto")
@@ -2049,7 +2056,7 @@ struct StartMenuView: View {
     private var hero: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                Image(systemName: "car.side.fill")
+                Image(systemName: "car.fill")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundColor(palette.onButton)
                     .frame(width: 28, height: 28)
@@ -2540,11 +2547,18 @@ struct MiniRutasApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView()
-            #if os(iOS)
-                .statusBarHidden(true)
-            #endif
+            content
         }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        #if os(iOS)
+        RootView()
+            .statusBarHidden(true)
+        #else
+        RootView()
+        #endif
     }
 }
 
